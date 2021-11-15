@@ -13,10 +13,12 @@ import cv2
 import tqdm
 
 def name_resolve(path):
-    name = os.path.splitext(os.path.basename(path))[0]
-    vid_id, frame_id = name.split('_')[0:2]
-    return vid_id, frame_id 
-    
+    name_folder = path.split('/')[-2]
+    name = path.split('/')[-1]
+    name= name_folder+'_'+name
+    vid_id = name.split('.jpg')[0]
+    return vid_id, None
+
 def total_euclidean_distance(a,b):
     assert len(a.shape) == 2
     return np.sum(np.linalg.norm(a-b,axis=1))
@@ -58,7 +60,6 @@ def random_erode_dilate(mask, ksize=None):
 
 # borrow from https://github.com/MarekKowalski/FaceSwap
 def blendImages(src, dst, mask, featherAmount=0.2):
-   
     maskIndices = np.where(mask != 0)
     
     src_mask = np.ones_like(mask)
@@ -107,57 +108,45 @@ def colorTransfer(src, dst, mask):
     return transferredDst
 
 class BIOnlineGeneration():
-    def __init__(self):
-        with open('precomuted_landmarks.json', 'r') as f:
+    def __init__(self,path_json, save_path):
+        self.save_path= save_path
+        with open(path_json, 'r') as f:
             self.landmarks_record =  json.load(f)
-            for k,v in self.landmarks_record.items():
+            for i,(k,v) in enumerate(self.landmarks_record.items()):
                 self.landmarks_record[k] = np.array(v)
-        # extract all frame from all video in the name of {videoid}_{frameid}
-        self.data_list = [
-                    '000_0000.png',
-                    '001_0000.png'      
-                    ] * 10000
+
+        self.list_path=[]
+        for a,b,c in os.walk(self.save_path):
+            for _c in c:
+                if '.jpg' in _c:
+                    self.list_path.append(os.path.join(a,_c))
+        print(self.list_path)
+        self.data_list = list(self.landmarks_record.keys())
         
         # predefine mask distortion
         self.distortion = iaa.Sequential([iaa.PiecewiseAffine(scale=(0.01, 0.15))])
         
-    def gen_one_datapoint(self):
-        background_face_path = random.choice(self.data_list)
-        data_type = 'real' if random.randint(0,1) else 'fake'
+    def gen_one_datapoint(self,idx=-1):
+        title = None
+        if idx==-1:
+            background_face_path = random.choice(self.data_list)
+        else:
+            background_face_path = self.data_list[idx]
+            title = self.data_list[idx].split('/')[-2]
+            title += '_' + self.data_list[idx].split('/')[-1]
+        if os.path.join(self.save_path,title) in self.list_path:
+            print("already exist")
+            return None,None,None,None
+
+        data_type = 'fake'
+        # data_type = 'real' if random.randint(0,1) else 'fake'
         if data_type == 'fake' :
             face_img,mask =  self.get_blended_face(background_face_path)
+            if mask is None:
+                return None,None,None,None
             mask = ( 1 - mask ) * mask * 4
-        else:
-            face_img = io.imread(background_face_path)
-            mask = np.zeros((317, 317, 1))
-        
-        # randomly downsample after BI pipeline
-        if random.randint(0,1):
-            aug_size = random.randint(64, 317)
-            face_img = Image.fromarray(face_img)
-            if random.randint(0,1):
-                face_img = face_img.resize((aug_size, aug_size), Image.BILINEAR)
-            else:
-                face_img = face_img.resize((aug_size, aug_size), Image.NEAREST)
-            face_img = face_img.resize((317, 317),Image.BILINEAR)
-            face_img = np.array(face_img)
-            
-        # random jpeg compression after BI pipeline
-        if random.randint(0,1):
-            quality = random.randint(60, 100)
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
-            face_img_encode = cv2.imencode('.jpg', face_img, encode_param)[1]
-            face_img = cv2.imdecode(face_img_encode, cv2.IMREAD_COLOR)
-        
-        face_img = face_img[60:317,30:287,:]
-        mask = mask[60:317,30:287,:]
-        
-        # random flip
-        if random.randint(0,1):
-            face_img = np.flip(face_img,1)
-            mask = np.flip(mask,1)
-            
-        return face_img,mask,data_type
+
+        return face_img,mask,data_type, title
         
     def get_blended_face(self,background_face_path):
         background_face = io.imread(background_face_path)
@@ -181,7 +170,10 @@ class BIOnlineGeneration():
         
         # filte empty mask after deformation
         if np.sum(mask) == 0 :
-            raise NotImplementedError
+            print('mask is empty!!!!!!!!!')
+            print(f'background_face_path : {background_face_path}')
+            return None,None
+            # raise NotImplementedError
 
         # apply color transfer
         foreground_face = colorTransfer(background_face, foreground_face, mask*255)
@@ -197,14 +189,12 @@ class BIOnlineGeneration():
         return blended_face,mask
     
     def search_similar_face(self,this_landmark,background_face_path):
-        vid_id, frame_id = name_resolve(background_face_path)
         min_dist = 99999999
-        
-        # random sample 5000 frame from all frams:
-        all_candidate_path = random.sample( self.data_list, k=5000) 
+        num_sample = 1000
+        # random sample frame from all frams:
+        all_candidate_path = random.sample( self.data_list, k=num_sample)
         
         # filter all frame that comes from the same video as background face
-        all_candidate_path = filter(lambda k:name_resolve(k)[0] != vid_id, all_candidate_path)
         all_candidate_path = list(all_candidate_path)
         
         # loop throungh all candidates frame to get best match
@@ -216,27 +206,31 @@ class BIOnlineGeneration():
                 min_path = candidate_path
 
         return min_path
-    
+
+    def check_aleady_exist(self, path):
+        if path in self.list_path:
+            print("already exist")
+            return True
+        else:
+            return False
+
 if __name__ == '__main__':
-    ds = BIOnlineGeneration()
+    save_path = 'FRAME 이미지 들어있는 경로'
+    ds = BIOnlineGeneration('랜드마크 정보있는 json 파일', save_path)
     from tqdm import tqdm
     all_imgs = []
-    for _ in tqdm(range(50)):
-        img,mask,label = ds.gen_one_datapoint()
+    cnt =0
+    idx_half = len(ds.data_list)//2
+    print('before' , len(ds.data_list))
+    ds.data_list = ds.data_list[:idx_half]
+    print('after' , len(ds.data_list))
+    num_iter = len(ds.data_list)
+    for i,_ in tqdm(enumerate(range(num_iter))):
+        img,mask,label,title = ds.gen_one_datapoint(i)
+        if mask is None:
+            print('CAN NOT WORK BECAUSE OF EMPTY MASK ')
+            continue
         mask = np.repeat(mask,3,2)
         mask = (mask*255).astype(np.uint8)
-        img_cat = np.concatenate([img,mask],1)
-        all_imgs.append(img_cat)
-    all_in_one = Image.new('RGB', (2570,2570))
-
-    for x in range(5):
-        for y in range(10):
-            idx = x*10+y   
-            im = Image.fromarray(all_imgs[idx])
-            
-            dx = x*514
-            dy = y*257
-            
-            all_in_one.paste(im, (dx,dy))
-
-    all_in_one.save("all_in_one.jpg")
+        img = Image.fromarray(img).resize((224,224))
+        img.save(f'{save_path}/{title}')
