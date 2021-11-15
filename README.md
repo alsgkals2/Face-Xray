@@ -1,3 +1,6 @@
+# Note
+I modified some code of unofficial implmented in Github to progress it. More, I upload code that can get the 64 landmarks of face in a frame image. Because Face-Xray is required the information of landmark face.
+
 # Face-X-ray
 The author's unofficial PyTorch re-implementation of Face Xray 
 
